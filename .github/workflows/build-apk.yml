@@ -1,4 +1,4 @@
-name: Extract ZIP and Build Local Project Server APK
+name: Extract Project ZIP and Build APK
 
 on:
   push:
@@ -10,116 +10,148 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  extract-and-build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
+          fetch-depth: 0
 
-      - name: Detect and Extract Project ZIP
+      - name: Locate Project ZIP
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Searching for project ZIP..."
-
-          mapfile -t ZIP_FILES < <(find . -maxdepth 1 -type f -iname "*.zip")
+          mapfile -t ZIP_FILES < <(
+            find . -maxdepth 1 -type f -iname "*.zip"
+          )
 
           if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
             echo "ERROR: Repository root must contain exactly one ZIP file."
-            echo "Found: ${#ZIP_FILES[@]}"
+            printf '%s\n' "${ZIP_FILES[@]}"
             exit 1
           fi
 
-          ZIP_FILE="${ZIP_FILES[0]}"
+          echo "ZIP_FILE=${ZIP_FILES[0]}" >> "$GITHUB_ENV"
 
-          echo "ZIP found: $ZIP_FILE"
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
 
           mkdir -p extracted
-
           unzip -q -o "$ZIP_FILE" -d extracted
 
-          echo "Searching recursively for Android Gradle project root..."
+          echo "ZIP extraction completed."
 
-          mapfile -t PROJECT_FILES < <(
+      - name: Detect Actual Android Project Root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t ROOTS < <(
             find extracted -type f \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \)
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -printf '%h\n' | sort -u
           )
 
-          if [ "${#PROJECT_FILES[@]}" -ne 1 ]; then
-            echo "ERROR: Expected exactly one Android Gradle project."
-            echo "Found: ${#PROJECT_FILES[@]}"
+          if [ "${#ROOTS[@]}" -ne 1 ]; then
+            echo "ERROR: Could not identify one unique Android project root."
+            printf '%s\n' "${ROOTS[@]}"
             exit 1
           fi
 
-          PROJECT_ROOT="$(dirname "${PROJECT_FILES[0]}")"
+          PROJECT_ROOT="${ROOTS[0]}"
 
-          echo "Detected project root: $PROJECT_ROOT"
+          REQUIRED_FILES=(
+            "build.gradle.kts"
+            "gradle/libs.versions.toml"
+            "gradle/wrapper/gradle-wrapper.properties"
+            "app/build.gradle.kts"
+            "app/src/main/AndroidManifest.xml"
+            "app/src/main/java/com/magic/localprojectserver/MainActivity.kt"
+            "app/src/main/java/com/magic/localprojectserver/LocalHttpServer.kt"
+            "app/src/main/java/com/magic/localprojectserver/ServerForegroundService.kt"
+          )
 
-          if [ ! -f "$PROJECT_ROOT/gradlew" ]; then
-            echo "ERROR: gradlew is missing."
-            exit 1
-          fi
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$PROJECT_ROOT/$FILE" ]; then
+              echo "ERROR: Missing required file: $FILE"
+              exit 1
+            fi
+          done
 
-          if [ ! -f "$PROJECT_ROOT/gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "ERROR: Gradle wrapper JAR is missing."
-            exit 1
-          fi
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
-          if [ ! -f "$PROJECT_ROOT/gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "ERROR: Gradle wrapper properties are missing."
-            exit 1
-          fi
+          echo "Android project root detected: $PROJECT_ROOT"
 
-          if [ ! -f "$PROJECT_ROOT/app/build.gradle" ] && \
-             [ ! -f "$PROJECT_ROOT/app/build.gradle.kts" ]; then
-            echo "ERROR: Android app Gradle file is missing."
-            exit 1
-          fi
-
-          echo "Project validation successful."
-
-          echo "Copying project files into repository root..."
+      - name: Copy Project into Repository Root
+        shell: bash
+        run: |
+          set -euo pipefail
 
           rsync -a \
-            --exclude='.git/' \
-            --exclude='.github/' \
+            --exclude='.github/workflows/extract-and-build.yml' \
             "$PROJECT_ROOT/" ./
-
-          chmod +x gradlew
 
           rm -rf extracted
           rm -f "$ZIP_FILE"
 
-          echo "Project extraction completed."
+          echo "Project files placed in repository root."
+
+      - name: Verify Project Structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f gradle/libs.versions.toml
+          test -f gradle/wrapper/gradle-wrapper.properties
+          test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+
+          echo "Project structure verified."
 
       - name: Commit Extracted Project
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
 
-          if ! git diff --cached --quiet; then
-            git commit -m "Extract Android project from ZIP"
-            git push
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
           else
-            echo "No project changes to commit."
+            git commit -m "Extract Android project from ZIP"
+            git push origin HEAD:main
           fi
 
-      - name: Validate Gradle Wrapper
-        uses: gradle/wrapper-validation-action@v2
+      - name: Set Up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Set Up Gradle 8.4
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+
+      - name: Set Up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gradle assembleDebug --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -127,3 +159,4 @@ jobs:
           name: LocalProjectServer-v1.0.0
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
