@@ -1,0 +1,46 @@
+name: Build APK from ZIP
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Step 1 - Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Step 2 - Unzip the Project
+      # ரெப்பாசிட்டரியில் உள்ள ZIP பைலை 'project_root' என்ற போல்டரில் Unzip செய்கிறது
+      run: |
+        mkdir project_root
+        unzip *.zip -d project_root
+
+    - name: Step 3 - Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Step 4 - Generate Gradle Wrapper
+      # விடுபட்ட gradle-wrapper.jar ஃபைலை தானாக உருவாக்குகிறது
+      working-directory: ./project_root
+      run: gradle wrapper
+
+    - name: Step 5 - Grant execute permission for gradlew
+      working-directory: ./project_root
+      run: chmod +x gradlew
+
+    - name: Step 6 - Build Debug APK
+      working-directory: ./project_root
+      run: ./gradlew assembleDebug --stacktrace
+
+    - name: Step 7 - Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: LocalProjectServer-APK
+        path: project_root/app/build/outputs/apk/debug/app-debug.apk
+        
