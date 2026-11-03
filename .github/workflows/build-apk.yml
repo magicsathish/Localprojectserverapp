@@ -1,0 +1,129 @@
+name: Extract ZIP and Build Local Project Server APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Detect and Extract Project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for project ZIP..."
+
+          mapfile -t ZIP_FILES < <(find . -maxdepth 1 -type f -iname "*.zip")
+
+          if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Repository root must contain exactly one ZIP file."
+            echo "Found: ${#ZIP_FILES[@]}"
+            exit 1
+          fi
+
+          ZIP_FILE="${ZIP_FILES[0]}"
+
+          echo "ZIP found: $ZIP_FILE"
+
+          mkdir -p extracted
+
+          unzip -q -o "$ZIP_FILE" -d extracted
+
+          echo "Searching recursively for Android Gradle project root..."
+
+          mapfile -t PROJECT_FILES < <(
+            find extracted -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \)
+          )
+
+          if [ "${#PROJECT_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly one Android Gradle project."
+            echo "Found: ${#PROJECT_FILES[@]}"
+            exit 1
+          fi
+
+          PROJECT_ROOT="$(dirname "${PROJECT_FILES[0]}")"
+
+          echo "Detected project root: $PROJECT_ROOT"
+
+          if [ ! -f "$PROJECT_ROOT/gradlew" ]; then
+            echo "ERROR: gradlew is missing."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_ROOT/gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "ERROR: Gradle wrapper JAR is missing."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_ROOT/gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "ERROR: Gradle wrapper properties are missing."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_ROOT/app/build.gradle" ] && \
+             [ ! -f "$PROJECT_ROOT/app/build.gradle.kts" ]; then
+            echo "ERROR: Android app Gradle file is missing."
+            exit 1
+          fi
+
+          echo "Project validation successful."
+
+          echo "Copying project files into repository root..."
+
+          rsync -a \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            "$PROJECT_ROOT/" ./
+
+          chmod +x gradlew
+
+          rm -rf extracted
+          rm -f "$ZIP_FILE"
+
+          echo "Project extraction completed."
+
+      - name: Commit Extracted Project
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Extract Android project from ZIP"
+            git push
+          else
+            echo "No project changes to commit."
+          fi
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/wrapper-validation-action@v2
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalProjectServer-v1.0.0
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
